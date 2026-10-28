@@ -1,0 +1,49 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+credentials*.json
+
+# Cloned repositories and generated data
+repos/
+data/
+parsed/
+parse_result.json
+out.json
+*.dump
+neo4j_query_table_data*.csv
+artifacts/
+
+# Python
+.venv/
+backend/.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.pytest-tmp/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Node/frontend
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+
+# Logs
+*.log
+logs/
+
+# Editor/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

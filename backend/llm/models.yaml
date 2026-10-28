@@ -1,0 +1,12 @@
+- id: gemini-free
+  name: Gemini Free
+  provider: gemini
+  available: true
+- id: openrouter-free
+  name: OpenRouter Free
+  provider: openrouter
+  available: false
+- id: ollama-local
+  name: Ollama Local
+  provider: ollama
+  available: false
