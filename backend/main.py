@@ -22,7 +22,11 @@ from backend.settings import settings
 
 logger = logging.getLogger(__name__)
 from backend.llm.gemini import GeminiProvider
+from backend.llm.groq import GroqProvider
 from backend.enrichment.job import debug_enrichment, run_enrichment, status_for
+from backend.estimation.engine import estimate_project
+from backend.wiki.planner import plan_project
+_latest_estimates: dict[str, dict] = {}
 
 
 def available_models() -> list[dict[str, Any]]:
@@ -153,11 +157,58 @@ def project_stats(project_id: str) -> dict:
 
 
 @app.get("/projects/{project_id}/graph")
-def project_graph(project_id: str, focus: str | None = None, depth: int = 1, types: str | None = None) -> dict:
+def project_graph(project_id: str, focus: str | None = None, depth: int = 1, types: str | None = None, component_id: str | None = None) -> dict:
     if neo4j_client.get_project(project_id) is None:
         raise HTTPException(status_code=404, detail="Project not found")
     selected_types = [item.strip() for item in types.split(",")] if types else None
-    return neo4j_client.graph_data(project_id, focus=focus, depth=depth, types=selected_types)
+    return neo4j_client.graph_data(project_id, focus=focus, depth=depth, types=selected_types, component_id=component_id)
+
+
+def _wiki_project(project_id: str) -> dict:
+    project = neo4j_client.get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("status") != "ready":
+        raise HTTPException(status_code=409, detail="Project must be ready")
+    return project
+
+
+@app.post("/projects/{project_id}/wiki/plan")
+def create_wiki_plan(project_id: str) -> dict:
+    _wiki_project(project_id)
+    return plan_project(project_id)
+
+
+@app.get("/projects/{project_id}/wiki/plan")
+def get_wiki_plan(project_id: str) -> dict:
+    _wiki_project(project_id)
+    result = neo4j_client.latest_wiki_plan(project_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="No wiki plan available")
+    return result
+
+
+@app.get("/projects/{project_id}/wiki/plan/diff")
+def get_wiki_plan_diff(project_id: str) -> dict:
+    return get_wiki_plan(project_id).get("diff", {})
+
+
+@app.get("/projects/{project_id}/wiki/components")
+def get_wiki_components(project_id: str) -> list[dict]:
+    return get_wiki_plan(project_id).get("components", [])
+
+
+@app.get("/projects/{project_id}/wiki/components/{component_id:path}")
+def get_wiki_component(project_id: str, component_id: str) -> dict:
+    component = next((item for item in get_wiki_components(project_id) if item["id"] == component_id), None)
+    if component is None:
+        raise HTTPException(status_code=404, detail="Component not found")
+    return component
+
+
+@app.get("/projects/{project_id}/wiki/entry-points")
+def get_wiki_entry_points(project_id: str) -> list[dict]:
+    return get_wiki_plan(project_id).get("entry_points", [])
 
 
 @app.get("/models")
@@ -172,12 +223,18 @@ async def generate(request: GenerateRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Unknown model")
     if not model.get("available"):
         raise HTTPException(status_code=400, detail="Selected model is not available")
-    if model.get("provider") != "gemini":
+    if model.get("provider") == "gemini":
+        if not settings.gemini_api_key:
+            raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured")
+        provider = GeminiProvider()
+    elif model.get("provider") == "groq":
+        if not settings.groq_api_key:
+            raise HTTPException(status_code=503, detail="GROQ_API_KEY is not configured")
+        provider = GroqProvider()
+    else:
         raise HTTPException(status_code=400, detail="Selected model provider is not configured")
-    if not settings.gemini_api_key:
-        raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured")
     try:
-        response = await GeminiProvider().generate(request.messages, request.tools)
+        response = await provider.generate(request.messages, request.tools)
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text[:500] or "Gemini request failed"
         raise HTTPException(status_code=502, detail=detail) from exc
@@ -232,6 +289,31 @@ async def enrich_project(project_id: str, background_tasks: BackgroundTasks, mod
         raise HTTPException(status_code=409, detail="Enrichment is already running")
     background_tasks.add_task(run_enrichment, project_id, model_id)
     return {"project_id": project_id, "status": "queued", "model": model_id}
+
+
+@app.post("/projects/{project_id}/enrich/estimate")
+def enrichment_estimate(project_id: str, request: dict[str, Any]) -> dict:
+    if neo4j_client.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    model_id = request.get("model_id", "gemini-free")
+    model = next((item for item in available_models() if item["id"] == model_id), None)
+    if not model or not model.get("available"):
+        raise HTTPException(status_code=400, detail="Selected model is not available")
+    result = estimate_project(project_id, model_id, request.get("strategy", "bottom-up"), request.get("mode", "full"), int(request.get("sample_size", settings.estimation_sample_size)), bool(request.get("calibrate", False)))
+    _latest_estimates[project_id] = result
+    return result
+
+
+@app.get("/projects/{project_id}/enrich/estimate/latest")
+def latest_estimate(project_id: str) -> dict:
+    if project_id not in _latest_estimates:
+        raise HTTPException(status_code=404, detail="No estimate available")
+    return _latest_estimates[project_id]
+
+
+@app.get("/estimation/status")
+def estimation_status(model_id: str = "gemini-free") -> dict:
+    return {"model_id": model_id, "node_types": {}, "message": "Calibration records are not yet available"}
 
 
 @app.get("/projects/{project_id}/enrich/status")

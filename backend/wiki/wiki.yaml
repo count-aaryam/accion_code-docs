@@ -1,0 +1,18 @@
+planner_version: v1
+max_components: 12
+min_component_files: 2
+max_component_files: 40
+louvain_resolution: 1.0
+random_seed: 42
+edge_weights:
+  calls: 1.0
+  imports: 3.0
+  inherits: 2.0
+  implements: 2.0
+  same_directory: 0.5
+include_tests: false
+test_path_patterns: ["test/", "tests/", "__tests__/", "*.test.*", "*.spec.*", "test_*.py", "*_test.py"]
+vendor_generated_patterns: ["vendor/", "third_party/", "generated/", "dist/", "build/", "*.min.js", "*.generated.*"]
+key_flow_cap: 6
+key_flow_depth: 4
+small_repo_file_threshold: 8

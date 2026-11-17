@@ -74,10 +74,14 @@ class Neo4jClient:
                 "name": entity.name, "file_path": entity.file_path,
                 "qualified_name": entity.qualified_name, "start_line": entity.start_line,
                 "end_line": entity.end_line, "content_hash": entity.content_hash,
-                "source_type": "parser", "commit_sha": commit_sha,
+                "source_type": "parser", "source": "parser", "confidence": 1.0,
+                "language": entity.language, "exported": entity.exported,
+                "export_name": entity.export_name, "is_default_export": entity.is_default_export,
+                "commit_sha": commit_sha,
                 "commit_parsed_at": commit_parsed_at,
             }
             node.update(_source_properties(repo_path, entity))
+            node.update(entity.properties or {})
             if entity.kind == EntityKind.FILE and repo_path:
                 node["blob_sha"] = _git_blob_sha(Path(repo_path), entity.file_path)
             nodes.append(node)
@@ -95,7 +99,7 @@ class Neo4jClient:
                     "id": target_id, "project_id": project_id,
                     "kind": "ExternalSymbol" if relationship.resolution and relationship.resolution.value == "EXTERNAL" else "UnresolvedSymbol",
                     "name": target_label, "file_path": "", "qualified_name": target_label,
-                    "start_line": 0, "end_line": 0, "content_hash": "", "source_type": "parser",
+                    "start_line": 0, "end_line": 0, "content_hash": "",
                 })
             edges.append({
                 "source_id": source_id, "target_id": target_id,
@@ -163,7 +167,7 @@ class Neo4jClient:
         assert self._driver is not None
         with self._driver.session() as session:
             record = session.run(
-                "MATCH (n:CodeEntity {project_id: $project_id, id: $node_id}) RETURN n.id AS id, n.kind AS kind, n.name AS name, n.file_path AS file_path, n.source AS source, n.source_omitted AS source_omitted, n.source_truncated AS source_truncated, n.source_redacted AS source_redacted",
+                "MATCH (n:CodeEntity {project_id: $project_id, id: $node_id}) RETURN n.id AS id, n.kind AS kind, n.name AS name, n.file_path AS file_path, n.language AS language, n.source AS source, n.source_omitted AS source_omitted, n.source_truncated AS source_truncated, n.source_redacted AS source_redacted",
                 project_id=project_id, node_id=node_id,
             ).single()
             return dict(record) if record else None
@@ -176,7 +180,53 @@ class Neo4jClient:
                 "MATCH (n:CodeEntity {project_id: $project_id}) DETACH DELETE n",
                 project_id=project_id,
             ).consume()
+            for label in ("WikiPlan", "WikiComponent", "EntryPoint", "WikiPage"):
+                session.run(f"MATCH (n:{label} {{project_id: $project_id}}) DETACH DELETE n", project_id=project_id).consume()
             session.run("MATCH (p:Project {id: $project_id}) DELETE p", project_id=project_id).consume()
+
+    def wiki_input(self, project_id: str) -> dict:
+        self.connect()
+        assert self._driver is not None
+        with self._driver.session() as session:
+            nodes = [dict(record) for record in session.run(
+                "MATCH (n:CodeEntity {project_id: $project_id}) RETURN n.id AS id, n.kind AS kind, n.name AS name, n.file_path AS file_path, n.start_line AS start_line, n.content_hash AS content_hash, n.language AS language",
+                project_id=project_id)]
+            edges = [dict(record) for record in session.run(
+                "MATCH (a:CodeEntity {project_id: $project_id})-[r:CODE_RELATIONSHIP {project_id: $project_id}]->(b:CodeEntity {project_id: $project_id}) RETURN a.id AS source, b.id AS target, r.kind AS kind, r.resolution AS resolution",
+                project_id=project_id)]
+            return {"nodes": nodes, "edges": edges}
+
+    def latest_wiki_plan(self, project_id: str) -> dict | None:
+        self.connect()
+        assert self._driver is not None
+        with self._driver.session() as session:
+            record = session.run("MATCH (p:WikiPlan {project_id: $project_id, current: true}) RETURN p.payload AS payload", project_id=project_id).single()
+            if not record or not record["payload"]:
+                return None
+            import json
+            return json.loads(record["payload"])
+
+    def write_wiki_plan(self, project_id: str, result: dict) -> None:
+        self.connect()
+        assert self._driver is not None
+        import json
+        components, entries, pages = result["components"], result["entry_points"], result["pages"]
+        with self._driver.session() as session:
+            session.run("CREATE CONSTRAINT wiki_component_id_unique IF NOT EXISTS FOR (n:WikiComponent) REQUIRE n.id IS UNIQUE").consume()
+            session.run("CREATE CONSTRAINT entry_point_id_unique IF NOT EXISTS FOR (n:EntryPoint) REQUIRE n.id IS UNIQUE").consume()
+            session.run("CREATE CONSTRAINT wiki_page_id_unique IF NOT EXISTS FOR (n:WikiPage) REQUIRE n.id IS UNIQUE").consume()
+            session.run("MATCH (n:WikiPlan {project_id: $project_id}) DETACH DELETE n", project_id=project_id).consume()
+            session.run("MATCH (n:WikiComponent {project_id: $project_id}) DETACH DELETE n", project_id=project_id).consume()
+            session.run("MATCH (n:EntryPoint {project_id: $project_id}) DETACH DELETE n", project_id=project_id).consume()
+            session.run("MATCH (n:WikiPage {project_id: $project_id}) DETACH DELETE n", project_id=project_id).consume()
+            session.run("CREATE (n:WikiPlan {project_id: $project_id, current: true, payload: $payload})", project_id=project_id, payload=json.dumps(result)).consume()
+            session.run("UNWIND $rows AS row MERGE (n:WikiComponent {id: row.id}) SET n += row", rows=[{**row, "project_id": project_id, "file_ids": row["file_ids"], "key_nodes": row["key_nodes"], "dependencies": [], "dependents": []} for row in components]).consume()
+            session.run("UNWIND $rows AS row MATCH (c:WikiComponent {id: row.component_id, project_id: $project_id}) MATCH (f:CodeEntity {id: row.file_id, project_id: $project_id}) MERGE (c)-[:COMPONENT_CONTAINS {project_id: $project_id}]->(f)", rows=[{"component_id": component["id"], "file_id": file_id} for component in components for file_id in component["file_ids"]], project_id=project_id).consume()
+            session.run("UNWIND $rows AS row MATCH (a:WikiComponent {id: row.source_id, project_id: $project_id}) MATCH (b:WikiComponent {id: row.target_id, project_id: $project_id}) MERGE (a)-[r:DEPENDS_ON {project_id: $project_id}]->(b) SET r += row", rows=[{"source_id": component["id"], "target_id": dependency["component_id"], **{key: value for key, value in dependency.items() if key != "component_id"}, "source": "derived"} for component in components for dependency in component.get("dependencies", [])], project_id=project_id).consume()
+            session.run("UNWIND $rows AS row MERGE (n:EntryPoint {id: row.id}) SET n += row", rows=[{**row, "project_id": project_id} for row in entries]).consume()
+            session.run("UNWIND $rows AS row MATCH (e:EntryPoint {id: row.entry_id, project_id: $project_id}) MATCH (n:CodeEntity {id: row.node_id, project_id: $project_id}) MERGE (e)-[:ENTRY_POINT_OF {project_id: $project_id, source: 'derived'}]->(n)", rows=[{"entry_id": entry["id"], "node_id": entry["node_id"]} for entry in entries if entry.get("node_id")], project_id=project_id).consume()
+            session.run("UNWIND $rows AS row MERGE (n:WikiPage {id: row.id}) SET n += row", rows=[{**row, "project_id": project_id, "component_ids": row["component_ids"], "covered_node_ids": row["covered_node_ids"], "entry_point_ids": row["entry_point_ids"], "planned_diagrams": row["planned_diagrams"]} for row in pages]).consume()
+            session.run("UNWIND $rows AS row MATCH (p:WikiPage {id: row.page_id, project_id: $project_id}) MATCH (n:CodeEntity {id: row.node_id, project_id: $project_id}) MERGE (p)-[:WIKI_PAGE_COVERS {project_id: $project_id, source: 'derived'}]->(n)", rows=[{"page_id": page["id"], "node_id": node_id} for page in pages for node_id in page["covered_node_ids"]], project_id=project_id).consume()
 
     def enrich_call_budget(self) -> int:
         return settings.enrich_max_calls_per_run
@@ -262,7 +312,7 @@ class Neo4jClient:
             )
             return [dict(record) for record in result]
 
-    def graph_data(self, project_id: str, focus: str | None = None, depth: int = 1, types: list[str] | None = None, limit: int = 500) -> dict:
+    def graph_data(self, project_id: str, focus: str | None = None, depth: int = 1, types: list[str] | None = None, limit: int = 500, component_id: str | None = None) -> dict:
         self.connect()
         assert self._driver is not None
         depth = max(0, min(depth, 5))
@@ -277,20 +327,21 @@ class Neo4jClient:
                 UNWIND selected AS n
                 OPTIONAL MATCH (n)-[:HAS_SUMMARY {{project_id: $project_id}}]->(s:Summary {{status: 'complete'}})
                 RETURN collect(DISTINCT {{id: n.id, kind: n.kind, name: n.name, file_path: n.file_path,
-                    start_line: n.start_line, end_line: n.end_line, summary: s.text}}) AS nodes
+                    start_line: n.start_line, end_line: n.end_line, language: n.language, summary: s.text}}) AS nodes
                 """
                 node_record = session.run(query, focus=focus, project_id=project_id, types=type_filter, types_empty=not type_filter, limit=limit).single()
             else:
                 query = """
                 MATCH (n:CodeEntity {project_id: $project_id})
-                WHERE ($types_empty OR n.kind IN $types)
+                WHERE ($component_id IS NULL OR EXISTS { MATCH (:WikiComponent {id: $component_id, project_id: $project_id})-[:COMPONENT_CONTAINS]->(n) })
+                  AND ($types_empty OR n.kind IN $types)
                 WITH collect(n)[0..$limit] AS selected
                 UNWIND selected AS n
                 OPTIONAL MATCH (n)-[:HAS_SUMMARY {project_id: $project_id}]->(s:Summary {status: 'complete'})
                 RETURN collect(DISTINCT {id: n.id, kind: n.kind, name: n.name, file_path: n.file_path,
-                    start_line: n.start_line, end_line: n.end_line, summary: s.text}) AS nodes
+                    start_line: n.start_line, end_line: n.end_line, language: n.language, summary: s.text}) AS nodes
                 """
-                node_record = session.run(query, project_id=project_id, types=type_filter, types_empty=not type_filter, limit=limit).single()
+                node_record = session.run(query, project_id=project_id, types=type_filter, types_empty=not type_filter, limit=limit, component_id=component_id).single()
             nodes = node_record["nodes"] if node_record else []
             node_ids = [node["id"] for node in nodes]
             edge_records = session.run(
@@ -306,6 +357,24 @@ class Neo4jClient:
 
     def update_enrichment_state(self, project_id: str, state: dict) -> None:
         self.update_project(project_id, enrichment_status=state.get("status"), enrichment_nodes_done=state.get("nodes_done", 0), enrichment_nodes_total=state.get("nodes_total", 0), enrichment_tokens_used=state.get("tokens_used", 0), enrichment_paused=state.get("paused", False), enrichment_resumable=state.get("resumable", False))
+
+    def record_usage(self, record: dict) -> None:
+        self.connect()
+        assert self._driver is not None
+        with self._driver.session() as session:
+            session.run(
+                "CREATE (u:LLMUsage $properties)", properties=record
+            ).consume()
+
+    def usage_records(self, project_id: str, model_id: str, prompt_version: str, limit: int = 2000) -> list[dict]:
+        self.connect()
+        assert self._driver is not None
+        with self._driver.session() as session:
+            result = session.run(
+                "MATCH (u:LLMUsage {project_id: $project_id, model_id: $model_id, prompt_version: $prompt_version}) RETURN u ORDER BY u.timestamp DESC LIMIT $limit",
+                project_id=project_id, model_id=model_id, prompt_version=prompt_version, limit=limit,
+            )
+            return [dict(record["u"]) for record in result]
 
 
 def _graph_entity_id(project_id: str, entity) -> str:

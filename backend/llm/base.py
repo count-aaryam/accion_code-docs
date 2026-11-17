@@ -25,6 +25,10 @@ class LLMResponse:
 
 
 class LLMProvider(ABC):
+    def count_tokens(self, text_or_messages: str | list[dict[str, Any]]) -> dict[str, Any]:
+        text = text_or_messages if isinstance(text_or_messages, str) else "\n".join(str(item.get("content", "")) for item in text_or_messages)
+        return {"tokens": max(1, (len(text) + 3) // 4), "exact": False}
+
     @abstractmethod
     async def generate(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> LLMResponse:
         raise NotImplementedError

@@ -2,6 +2,26 @@
   name: Gemini Free
   provider: gemini
   available: true
+  input_price_per_million: 0
+  output_price_per_million: 0
+  requests_per_minute: null
+  requests_per_day: null
+  tokens_per_minute: null
+  tokens_per_day: null
+  context_window: 1048576
+  pricing_last_verified: "2026-10-30"
+- id: groq-free
+  name: Groq Free
+  provider: groq
+  available: true
+  input_price_per_million: 0
+  output_price_per_million: 0
+  requests_per_minute: null
+  requests_per_day: null
+  tokens_per_minute: null
+  tokens_per_day: null
+  context_window: 131072
+  pricing_last_verified: "2026-10-30"
 - id: openrouter-free
   name: OpenRouter Free
   provider: openrouter

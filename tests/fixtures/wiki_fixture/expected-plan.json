@@ -1,0 +1,28 @@
+{
+  "components": [
+    {"name": "Root", "file_count": 1, "method": "louvain"},
+    {"name": "Api", "file_count": 3, "method": "louvain"},
+    {"name": "Core", "file_count": 1, "method": "louvain"},
+    {"name": "Models", "file_count": 5, "method": "louvain"}
+  ],
+  "entry_points": [
+    {"kind": "python_main", "file": "cli.py", "route_method": null, "route_path": null, "evidence": "if __name__ == '__main__'"},
+    {"kind": "cli", "file": "cli.py", "route_method": null, "route_path": null, "evidence": "argparse/click/typer import or usage"},
+    {"kind": "app", "file": "app/main.py", "route_method": null, "route_path": null, "evidence": "FastAPI/Flask/Starlette application creation"},
+    {"kind": "route", "file": "app/main.py", "route_method": "GET", "route_path": "/health", "evidence": "@app.get(\"/health"},
+    {"kind": "route", "file": "app/api/rides.py", "route_method": "POST", "route_path": "/rides", "evidence": "@router.post(\"/rides"},
+    {"kind": "route", "file": "app/api/rides.py", "route_method": "GET", "route_path": "/rides/{id}", "evidence": "@router.get(\"/rides/{id}"},
+    {"kind": "route", "file": "app/api/users.py", "route_method": "GET", "route_path": "/users/{id}", "evidence": "@router.get(\"/users/{id}"}
+  ],
+  "pages": [
+    {"slug": "overview", "type": "overview", "status": "planned"},
+    {"slug": "root", "type": "component", "status": "planned"},
+    {"slug": "api", "type": "component", "status": "planned"},
+    {"slug": "core", "type": "component", "status": "planned"},
+    {"slug": "models", "type": "component", "status": "planned"},
+    {"slug": "api-reference", "type": "api-reference", "status": "planned"},
+    {"slug": "data-models", "type": "data-models", "status": "planned"},
+    {"slug": "getting-started", "type": "getting-started", "status": "planned"}
+  ],
+  "excluded_files": {"test": 1}
+}

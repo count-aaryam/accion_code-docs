@@ -26,6 +26,7 @@ class GeminiProvider(LLMProvider):
 
     def __init__(self, model: str | None = None) -> None:
         self.model = model or settings.gemini_model
+        self.api_key = settings.gemini_api_key
         self._semaphore = asyncio.Semaphore(settings.llm_max_concurrency)
 
     async def generate(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> LLMResponse:
@@ -34,7 +35,7 @@ class GeminiProvider(LLMProvider):
             payload["reasoning_effort"] = "low"
         if tools:
             payload["tools"] = tools
-        headers = {"Authorization": f"Bearer {settings.gemini_api_key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         started = time.perf_counter()
         async with self._semaphore:
             async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as client:

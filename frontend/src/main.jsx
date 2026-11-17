@@ -4,6 +4,7 @@ import cytoscape from "cytoscape";
 import "./styles.css";
 
 function App() {
+  const graphProjectId = new URLSearchParams(window.location.search).get("graph");
   const [health, setHealth] = useState({ loading: true });
   const [projects, setProjects] = useState([]);
   const [form, setForm] = useState({ name: "", github_url: "", branch: "main", access_token: "" });
@@ -11,12 +12,18 @@ function App() {
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState("gemini-free");
   const [enriching, setEnriching] = useState(null);
-  const [selectedProject, setSelectedProject] = useState(null);
+  const [selectedProject, setSelectedProject] = useState(graphProjectId);
   const [graph, setGraph] = useState({ nodes: [], edges: [] });
   const [selectedNode, setSelectedNode] = useState(null);
   const [search, setSearch] = useState("");
   const [nodeTypes, setNodeTypes] = useState([]);
   const [edgeTypes, setEdgeTypes] = useState([]);
+  const [estimate, setEstimate] = useState(null);
+  const [estimating, setEstimating] = useState(false);
+  const [summaryWidth, setSummaryWidth] = useState(280);
+  const [resizingSummary, setResizingSummary] = useState(false);
+  const [wikiTab, setWikiTab] = useState(false);
+  const [wikiPlan, setWikiPlan] = useState(null);
   const graphRef = useRef(null);
   const cyRef = useRef(null);
 
@@ -33,7 +40,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    fetch("http://localhost:8000/projects").then((response) => response.ok ? response.json() : []).then((items) => { setProjects(items); if (items[0]) setSelectedProject(items[0].id); }).catch(() => {});
+    fetch("http://localhost:8000/projects").then((response) => response.ok ? response.json() : []).then((items) => { setProjects(items); if (!graphProjectId && items[0]) setSelectedProject(items[0].id); }).catch(() => {});
   }, []);
 
   async function loadGraph(projectId, focus = "") {
@@ -68,6 +75,15 @@ function App() {
     return () => cy.destroy();
   }, [graph, selectedProject, edgeTypes.join(",")]);
 
+  useEffect(() => {
+    if (!resizingSummary) return undefined;
+    const move = (event) => setSummaryWidth(Math.max(220, Math.min(520, window.innerWidth - event.clientX - 32)));
+    const stop = () => setResizingSummary(false);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+    return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); };
+  }, [resizingSummary]);
+
   async function submit(event) {
     event.preventDefault();
     setMessage("Creating and cloning...");
@@ -91,8 +107,24 @@ function App() {
     }, 1000);
   }
 
+  async function estimateProject(projectId) {
+    setEstimating(true);
+    const available = models.filter((model) => model.available);
+    const results = await Promise.all(available.map(async (model) => {
+      const response = await fetch(`http://localhost:8000/projects/${projectId}/enrich/estimate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model_id: model.id, strategy: "bottom-up", mode: "full", sample_size: 30, calibrate: false }) });
+      return response.ok ? { model, data: await response.json() } : null;
+    }));
+    setEstimate({ projectId, results: results.filter(Boolean) });
+    setEstimating(false);
+  }
+
+  async function planWiki(projectId) {
+    const response = await fetch(`http://localhost:8000/projects/${projectId}/wiki/plan`, { method: "POST" });
+    if (response.ok) { setWikiPlan(await response.json()); setWikiTab(true); }
+  }
+
   return (
-    <main className="shell">
+    <main className={`shell ${graphProjectId ? "graph-only" : ""}`}>
       <p className="eyebrow">FastAPI × Neo4j</p>
       <h1>accion-docs</h1>
       <p className="lede">A focused workspace for understanding your codebase.</p>
@@ -118,11 +150,14 @@ function App() {
         <button type="submit">Add project</button>
         {message && <small>{message}</small>}
       </form>
-      <section className="projects"><p className="label">Projects</p>{projects.map((project) => <article className="project" key={project.id}><div><strong>{project.name}</strong>{project.enrichment && <small>{project.enrichment.status} · {project.enrichment.nodes_done}/{project.enrichment.nodes_total} nodes · {project.enrichment.tokens_used} tokens</small>}</div><div><span>{project.status}</span><button className="enrich" disabled={enriching === project.id} onClick={() => enrich(project.id)}>{enriching === project.id ? "Enriching..." : "Enrich"}</button></div></article>)}</section>
-      <section className="graph-section">
+      <section className="projects"><p className="label">Projects</p>{projects.map((project) => { const enrichmentComplete = project.enrichment?.status === "complete" || project.enrichment_status === "complete"; return <article className="project" key={project.id}><div><strong>{project.name}</strong>{project.enrichment && <small>{project.enrichment.status} · {project.enrichment.nodes_done}/{project.enrichment.nodes_total} nodes · {project.enrichment.tokens_used} tokens</small>}</div><div><span>{project.status}</span><button className="estimate" disabled={estimating} onClick={() => estimateProject(project.id)}>{estimating ? "Estimating..." : "Estimate"}</button><button className="enrich" disabled={enriching === project.id} onClick={() => enrich(project.id)}>{enriching === project.id ? "Enriching..." : "Enrich"}</button>{enrichmentComplete && <button className="view-graph" onClick={() => window.open(`${window.location.origin}/?graph=${project.id}`, "_blank", "noopener,noreferrer")}>View graph</button>}</div></article>; })}</section>
+      {estimate && <section className="estimate-menu"><button className="close-estimate" onClick={() => setEstimate(null)}>×</button><p className="label">Approximate token usage</p>{estimate.results.map(({ model, data }) => <article key={model.id}><strong>{model.name}</strong><span>Approximately {data.totals.input_tokens.p50 + data.totals.output_tokens.p50} tokens</span><span>Likely range: {data.totals.input_tokens.p50 + data.totals.output_tokens.p50}–{data.totals.input_tokens.p90 + data.totals.output_tokens.p90} tokens</span><small>Criteria: {data.meta.confidence} confidence, {data.totals.calls} planned calls, `{data.meta.prompt_version}` prompt, local ~4 characters/token heuristic{data.assumptions?.length ? `, ${data.assumptions.join("; ")}` : ""}.</small></article>)}</section>}
+      {wikiTab && wikiPlan && <section className="wiki-panel"><button onClick={() => setWikiTab(false)}>Close wiki plan</button><h2>Page outline</h2>{wikiPlan.pages.map((page) => <div key={page.id}><strong>{page.title}</strong> <small>{page.type} · {page.status}</small></div>)}<h2>Components</h2>{wikiPlan.components.map((component) => <div key={component.id}><strong>{component.name}</strong> · {component.file_count} files · cohesion {component.cohesion} · {component.method}</div>)}<h2>Entry points</h2>{wikiPlan.entry_points.map((entry) => <div key={entry.id}><strong>{entry.kind}</strong> · {entry.file || ""} · {entry.evidence}</div>)}<h2>Diagnostics</h2><pre>{JSON.stringify(wikiPlan.diagnostics, null, 2)}</pre></section>}
+      <section className="wiki-controls"><button disabled={!selectedProject} onClick={() => planWiki(selectedProject)}>Plan wiki for selected project</button></section>
+      <section className={`graph-section ${graphProjectId ? "graph-only-section" : ""}`}>
         <div className="graph-toolbar"><select value={selectedProject || ""} onChange={(event) => setSelectedProject(event.target.value)}><option value="">Select project</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select><input placeholder="Search nodes" value={search} onChange={(event) => { setSearch(event.target.value); cyRef.current?.nodes().forEach((node) => node.style("display", !event.target.value || node.data("label").toLowerCase().includes(event.target.value.toLowerCase()) ? "element" : "none")); }} /></div>
         <div className="type-filters">{["File", "Class", "Function", "Method"].map((type) => <label key={type}><input type="checkbox" checked={nodeTypes.includes(type)} onChange={() => setNodeTypes((current) => current.includes(type) ? current.filter((item) => item !== type) : [...current, type])} />{type}</label>)}<span>Edges:</span>{["CONTAINS", "IMPORTS", "INHERITS", "CALLS"].map((type) => <label key={type}><input type="checkbox" checked={edgeTypes.includes(type)} onChange={() => setEdgeTypes((current) => current.includes(type) ? current.filter((item) => item !== type) : [...current, type])} />{type}</label>)}</div>
-        <div className="graph-layout"><div ref={graphRef} className="graph-canvas" />{selectedNode && <aside className="node-panel"><button onClick={() => setSelectedNode(null)}>×</button><h3>{selectedNode.name}</h3><small>{selectedNode.kind}</small><p>{selectedNode.file_path}:{selectedNode.start_line}-{selectedNode.end_line}</p><p>{selectedNode.summary || "No fresh summary available."}</p></aside>}</div>
+        <div className="graph-layout" style={{ gridTemplateColumns: `minmax(0, 1fr) ${selectedNode ? "10px" : "0px"} ${selectedNode ? `${summaryWidth}px` : "0px"}` }}><div ref={graphRef} className="graph-canvas" />{selectedNode && <><div className="graph-splitter" onPointerDown={() => setResizingSummary(true)} title="Drag horizontally to resize summary" /><aside className="node-panel"><button onClick={() => setSelectedNode(null)}>×</button><h3>{selectedNode.name}</h3><small>{selectedNode.kind}</small><p>Language: {selectedNode.language || "unknown"}</p><p>{selectedNode.file_path}:{selectedNode.start_line}-{selectedNode.end_line}</p><p>{selectedNode.summary || "No fresh summary available."}</p></aside></>}</div>
       </section>
     </main>
   );

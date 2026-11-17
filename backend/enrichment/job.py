@@ -3,12 +3,15 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from backend.core.models import EntityKind
 from backend.db.graph import neo4j_client
 from backend.llm.gemini import GeminiProvider
+from backend.llm.groq import GroqProvider
 from backend.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -32,8 +35,9 @@ async def run_enrichment(project_id: str, model_id: str) -> None:
     if not resume:
         state.update(nodes_done=0, tokens_used=0)
     state.update(status="running", model=model_id, paused=False, resumable=False)
-    provider = GeminiProvider()
+    provider = _provider_for(model_id)
     calls = 0
+    run_id = str(uuid.uuid4())
     try:
         levels = []
         for kind in (EntityKind.FUNCTION.value, EntityKind.METHOD.value, EntityKind.CLASS.value, EntityKind.FILE.value, "Project"):
@@ -62,7 +66,16 @@ async def run_enrichment(project_id: str, model_id: str) -> None:
                 response = await provider.generate([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}])
                 calls += 1
                 state["tokens_used"] += response.usage.total_tokens
-                neo4j_client.write_summary(project_id, target["id"], response.text.strip(), model_id, settings.gemini_model, PROMPT_VERSION, input_hash)
+                neo4j_client.record_usage({
+                    "run_id": run_id, "project_id": project_id, "model_id": model_id,
+                    "actual_model": settings.gemini_model if model_id == "gemini-free" else settings.groq_model,
+                    "prompt_version": PROMPT_VERSION, "strategy": "bottom-up",
+                    "node_type": kind, "level": kind.lower(), "batched": False, "batch_size": 1,
+                    "input_tokens": response.usage.prompt_tokens, "output_tokens": response.usage.completion_tokens,
+                    "reasoning_tokens": 0, "retry_count": 0, "estimated_p50": 0,
+                    "estimated_p90": 0, "timestamp": datetime.now(timezone.utc).isoformat(), "outcome": "success",
+                })
+                neo4j_client.write_summary(project_id, target["id"], response.text.strip(), model_id, provider.model, PROMPT_VERSION, input_hash)
                 state["nodes_done"] += 1
                 neo4j_client.update_enrichment_state(project_id, state)
         state.update(status="complete", paused=False, resumable=False)
@@ -83,6 +96,10 @@ def build_enrichment_prompt(project_id: str, kind: str, target: dict[str, Any]) 
             raise ValueError("No successful child summaries available")
         prompt = f"Summarize this {kind} using only these child summaries.\nCHILD SUMMARIES BEGIN\n" + "\n\n".join(children) + "\nCHILD SUMMARIES END"
     return prompt, _hash(PROMPT_VERSION, settings.gemini_model, prompt)
+
+
+def _provider_for(model_id: str):
+    return GroqProvider() if model_id == "groq-free" else GeminiProvider()
 
 
 def debug_enrichment(project_id: str, node_id: str) -> dict[str, Any]:

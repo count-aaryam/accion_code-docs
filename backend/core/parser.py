@@ -10,6 +10,8 @@ from typing import Any
 
 from tree_sitter import Language, Parser
 import tree_sitter_python
+import tree_sitter_javascript
+import tree_sitter_typescript
 
 from backend.core.models import Entity, EntityKind, ParseResult, Relationship, RelationshipKind, Resolution
 
@@ -149,11 +151,59 @@ class PythonTreeSitterParser(LanguageParser):
             context.relationships.append(Relationship(RelationshipKind.INHERITS, source.id, target.id if target else None, name, resolution, line, module))
 
 
+class JavaScriptTreeSitterParser(LanguageParser):
+    def __init__(self, language="javascript"):
+        grammar = tree_sitter_javascript.language() if language == "javascript" else (tree_sitter_typescript.language_tsx() if language == "tsx" else tree_sitter_typescript.language_typescript())
+        self.language, self._parser = language, Parser(Language(grammar))
+
+    def parse_file(self, path: Path, relative_path: str):
+        source = path.read_bytes(); tree = self._parser.parse(source)
+        if tree.root_node.has_error: raise SyntaxError("tree-sitter reported syntax errors")
+        file = Entity(f"file:{relative_path}", EntityKind.FILE, relative_path, relative_path, 1, len(source.splitlines()) or 1, _hash(source), language=self.language)
+        entities, relationships, symbols, calls = [file], [], {}, []
+        def text(n): return _text(n, source)
+        def add(kind, name, node, parent, scope, exported=False, default=False):
+            q = ".".join((*scope, name)); eid = f"{kind.value.lower()}:{relative_path}::{q}"
+            if any(e.id == eid for e in entities): return next(e for e in entities if e.id == eid)
+            props = {"is_component": name[:1].isupper() and self.language in {"javascript", "tsx"}} if kind in {EntityKind.CLASS, EntityKind.FUNCTION} else {}
+            e = Entity(eid, kind, name, relative_path, node.start_point[0]+1, node.end_point[0]+1, _hash(node.text), q, self.language, exported, name if exported else "", default, props)
+            entities.append(e); symbols[q] = e; relationships.append(Relationship(RelationshipKind.CONTAINS, parent.id, e.id, name, None, None, resolved=True)); return e
+        def walk(n, parent=file, scope=()):
+            typ, name_node = n.type, n.child_by_field_name("name"); name = text(name_node) if name_node else ""
+            exported = n.parent and n.parent.type in {"export_statement", "export_default_declaration"}; default = exported and "default" in text(n.parent)
+            current = parent; new_scope = scope
+            kinds = {"class_declaration":EntityKind.CLASS,"function_declaration":EntityKind.FUNCTION,"interface_declaration":EntityKind.INTERFACE,"type_alias_declaration":EntityKind.TYPE_ALIAS,"enum_declaration":EntityKind.ENUM}
+            if typ in kinds and name: current = add(kinds[typ], name, n, parent, scope, exported, default); new_scope = (*scope,name)
+            elif typ == "variable_declarator" and name:
+                value = n.child_by_field_name("value")
+                if value and value.type in {"arrow_function", "function", "function_expression"}:
+                    current = add(EntityKind.FUNCTION, name, value, parent, scope, exported, default); new_scope = (*scope,name)
+            elif typ == "method_definition" and name: current = add(EntityKind.METHOD, name, n, parent, scope, False); new_scope = (*scope,name)
+            if typ in {"call_expression", "new_expression"}:
+                fn = n.child_by_field_name("function") or n.child_by_field_name("constructor")
+                if fn: calls.append((current.id, text(fn), n.start_point[0]+1))
+            if typ == "import_statement":
+                mod = n.child_by_field_name("source"); module = text(mod).strip("'\"") if mod else ""
+                import re
+                clause = text(n).split(" from ", 1)[0].removeprefix("import").strip()
+                names = tuple(re.findall(r"[A-Za-z_$][\w$]*", clause.replace("type", "")))
+                relationships.append(Relationship(RelationshipKind.IMPORTS, file.id, None, module, Resolution.UNRESOLVED, n.start_point[0]+1, module, names, " type " in text(n), False))
+            for child in n.named_children: walk(child, current, new_scope)
+        walk(tree.root_node)
+        for sid, call, line in calls:
+            target = symbols.get(call) or symbols.get(call.split(".")[-1])
+            if not target and call.startswith("this."):
+                method = call.split(".", 1)[1]
+                target = next((entity for qualified, entity in symbols.items() if qualified.endswith("." + method) and entity.kind == EntityKind.METHOD), None)
+            relationships.append(Relationship(RelationshipKind.CALLS, sid, target.id if target else None, call, Resolution.INTERNAL if target else Resolution.UNRESOLVED, line, resolved=bool(target)))
+        return entities, relationships
+
+
 class RepositoryParser:
-    IGNORED_DIRS = {".git", "venv", ".venv", "node_modules", "build", "dist", "__pycache__", "site-packages"}
+    IGNORED_DIRS = {".git", "venv", ".venv", "node_modules", "build", "dist", "out", ".next", ".nuxt", "coverage", ".turbo", "vendor", "bower_components", "__pycache__", "site-packages"}
 
     def __init__(self, language_parsers: dict[str, LanguageParser] | None = None) -> None:
-        self.language_parsers = language_parsers or {".py": PythonTreeSitterParser()}
+        self.language_parsers = language_parsers or {".py": PythonTreeSitterParser(), **{x: JavaScriptTreeSitterParser() for x in (".js",".mjs",".cjs",".jsx")}, **{x: JavaScriptTreeSitterParser("typescript") for x in (".ts",".mts",".cts")}, ".tsx": JavaScriptTreeSitterParser("tsx")}
 
     def parse(self, repo_path: str | Path) -> ParseResult:
         root, result = Path(repo_path), ParseResult([], [], [])
@@ -164,11 +214,16 @@ class RepositoryParser:
                 if parser is None:
                     continue
                 relative_path = path.relative_to(root).as_posix()
+                if path.stat().st_size > 1024 * 1024:
+                    result.skipped_files.append(relative_path); result.skip_reasons[relative_path] = "over_1mb"; continue
+                if filename.endswith((".min.js", ".bundle.js", ".map")):
+                    result.skipped_files.append(relative_path); result.skip_reasons[relative_path] = "generated_or_minified"; continue
                 try:
                     entities, relationships = parser.parse_file(path, relative_path)
                 except (OSError, UnicodeDecodeError, SyntaxError) as exc:
                     logger.warning("Skipping %s: %s", relative_path, type(exc).__name__)
                     result.skipped_files.append(relative_path)
+                    result.skip_reasons[relative_path] = type(exc).__name__
                     continue
                 result.entities.extend(entities)
                 result.relationships.extend(relationships)
@@ -193,10 +248,19 @@ class RepositoryParser:
                 source = files.get(relationship.source_id.removeprefix("file:"))
                 if source:
                     imports_by_file.setdefault(source.file_path, []).append(relationship)
+        def resolve_module(source_path: str, module: str):
+            if not module.startswith("."):
+                return None
+            base = (Path(source_path).parent / module).as_posix()
+            candidates = [base, *(f"{base}{ext}" for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs")), *(f"{base}/index{ext}" for ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"))]
+            return files.get(next((item for item in candidates if item in files), ""))
         updated = []
         for relationship in result.relationships:
             if relationship.kind == RelationshipKind.IMPORTS:
                 target = modules.get((relationship.module or relationship.target_name).lstrip("."))
+                if not target:
+                    source_file = files.get(relationship.source_id.removeprefix("file:"))
+                    target = resolve_module(source_file.file_path, relationship.module or relationship.target_name) if source_file else None
                 if target:
                     relationship = replace(relationship, target_id=target.id, resolution=Resolution.INTERNAL)
                 elif relationship.module and not relationship.module.startswith("."):
@@ -207,6 +271,8 @@ class RepositoryParser:
                     for imported in imports_by_file.get(source_entity.file_path, []):
                         if relationship.target_name in imported.names:
                             module_entity = modules.get((imported.module or "").lstrip("."))
+                            if not module_entity:
+                                module_entity = resolve_module(source_entity.file_path, imported.module or "")
                             target = top_level.get((module_entity.file_path, relationship.target_name)) if module_entity else None
                             if target:
                                 relationship = replace(relationship, target_id=target.id, resolution=Resolution.INTERNAL)

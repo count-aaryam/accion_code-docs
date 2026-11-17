@@ -18,14 +18,27 @@ button { border: 0; color: #ffffff; background: #c83232; font-weight: 700; curso
 .project span { color: #f06a6a; font-size: .85rem; text-transform: capitalize; }
 .project > div:last-child { display: flex; align-items: center; gap: 12px; }
 .enrich { width: auto; padding: 7px 10px; font-size: .8rem; }
-.graph-section { margin-top: 48px; }
+.view-graph { width: auto; padding: 7px 10px; background: #555; font-size: .8rem; }
+.estimate { width: auto; padding: 7px 10px; background: #704040; font-size: .8rem; }
+.estimate-menu { position: fixed; right: 24px; top: 24px; z-index: 3; width: 340px; padding: 18px; border: 1px solid #6b4444; border-radius: 14px; background: #242424; box-shadow: 0 16px 50px #0008; }
+.estimate-menu article { display: grid; gap: 4px; padding: 12px 0; border-bottom: 1px solid #444; }
+.estimate-menu article span { color: #eee; font-size: .8rem; }
+.close-estimate { width: auto; float: right; padding: 2px 8px; }
+.graph-section { display: none; margin-top: 48px; }
+.graph-only { max-width: none; min-height: 100vh; padding: 20px; }
+.graph-only > :not(.graph-section) { display: none; }
+.graph-only .graph-section { display: block; width: 100vw; height: 100vh; margin: 0; }
+.graph-only-section .graph-layout { height: calc(100vh - 120px); }
+.graph-only-section .graph-canvas { min-height: 0; height: 100%; }
 .graph-toolbar { display: flex; gap: 10px; max-width: 720px; }
 .graph-toolbar select, .graph-toolbar input { flex: 1; }
 .type-filters { display: flex; gap: 12px; margin: 12px 0; color: #aaa; font-size: .8rem; }
 .type-filters input { width: auto; }
-.graph-layout { display: flex; gap: 16px; }
+.graph-layout { display: grid; gap: 0; }
 .graph-canvas { min-height: 520px; flex: 1; border: 1px solid #4a4a4a; border-radius: 12px; background: #202020; }
-.node-panel { width: 230px; padding: 16px; border: 1px solid #4a4a4a; border-radius: 12px; background: #242424; }
+.graph-splitter { width: 10px; cursor: col-resize; }
+.graph-splitter::after { content: ""; display: block; width: 2px; height: 100%; margin: 0 auto; background: #555; }
+.node-panel { min-width: 0; overflow: auto; padding: 16px; border: 1px solid #4a4a4a; border-radius: 12px; background: #242424; }
 .node-panel button { width: auto; float: right; padding: 3px 8px; }
 .model-picker { max-width: 440px; margin-top: 28px; }
 select { width: 100%; padding: 13px 14px; border: 1px solid #4a4a4a; border-radius: 10px; color: #eeeeee; background: #242424; font: inherit; }
